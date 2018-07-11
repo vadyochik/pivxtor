@@ -1,0 +1,31 @@
+version: '3'
+services:
+  config:
+    build:
+      context: ./config
+    command:
+      - generate
+    environment:
+      - TOR_ISOLATED_IP
+      - TOR_LOG_LEVEL
+      - TOR_CONFIG_REGENERATE
+      - PIVX_ISOLATED_IP
+      - PIVX_UID
+      - PIVX_ONLYNET
+      - PIVX_ONION_HIDDEN_SERVICE
+      - PIVX_ONION_HIDDEN_SERVICE_REGENERATE
+      - PIVX_DEBUG
+      - PIVX_CONFIG_REGENERATE
+    volumes:
+      - torvolume:/tordata
+      - pivxvolume:/pivxdata
+    network_mode: none
+  backup:
+    build:
+      context: ./backup
+    command:
+      - all
+    volumes:
+      - pivxvolume:/pivxdata:ro
+      - ${PIVX_BACKUPDIR}:/pivxbackup
+    network_mode: none

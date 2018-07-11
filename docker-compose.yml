@@ -1,0 +1,34 @@
+version: '3'
+services:
+  tor:
+    image: ${TOR_IMAGE}
+    command:
+      - /usr/bin/tor
+      - -f
+      - /var/lib/tor/torrc
+    volumes:
+      - torvolume:/var/lib/tor
+    networks:
+      default: {}
+      isolated:
+        ipv4_address: ${TOR_ISOLATED_IP}
+  pivx:
+    image: ${PIVX_IMAGE}
+    volumes:
+      - pivxvolume:/pivx/.pivx
+    depends_on:
+      - tor
+    networks:
+      isolated:
+        ipv4_address: ${PIVX_ISOLATED_IP}
+volumes:
+  torvolume: {}
+  pivxvolume: {}
+networks:
+  default: {}
+  isolated:
+    internal: true
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${TOR_ISOLATED_SUBNET}

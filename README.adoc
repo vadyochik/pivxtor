@@ -1,0 +1,509 @@
+= Dockerized PIVX in TOR
+:toc: left
+:icons: font
+:pass_note: pass:quotes[If you're not using `pass` utility, replace `"$(pass show pivxtor)"` with your plaintext passphrase or use some other methods, like `"$(gpg2 -q --no-tty -d ~/.secrets/wallet_passphrase.gpg)"`]
+:pivx_address: "D6EyeXyeg2nRk1DFExJ1JqHy1kCsRgAaHW"
+
+== General info
+
+This docker-compose project consists of four services: two main long-running services and two additional ad-hoc administrative ones.
+
+*_Main services_*. Defined in _docker-compose.yml_:
+
+[horizontal]
+tor:: Tor SOCKS proxy daemon. Used by PIVX node as a gateway to onion network or clearnet.
+pivx:: PIVX node daemon. Connected to isolated network and goes outside via Tor gateway only.
+
+*_Admin services_*. Defined in _docker-compose.admin.yml_:
+
+[horizontal]
+config:: ad-hoc one-shot job for configuring and reconfiguring _torrc_ and _pivx.conf_ configuration files according to environment variables set in _.env_ file.
+backup:: ad-hoc one-shot job for backing up important PIVX files (_backups_ folder; _wallet.dat_, _masternode.conf_ and _pivx.conf_ files) to specified destination folder on local host or into the named docker volume.
+
+NOTE: *Notes on implementation:* +
+Multiple Compose files method was used to implement ad-hoc https://docs.docker.com/compose/extends/#administrative-tasks[Administrative tasks] in this project. +
+Static IPs are used because not all directives in config files would resolve the name into IP, so we will get something like: "Unparseable address in hidden service port configuration." error from _tor_ daemon. +
+Automatic creation of onion hidden service by pivx daemon with `-listenonion` option is not used here because `ADD_ONION` command from _src/torcontrol.cpp_ uses hardcoded "127.0.0.1" value, but we are running tor proxy and pivx node in a separate containers. +
+Option `dns=0` in _pivx.conf_ is used so no dns resolving is attempted for `-addnode`, `-seednode` and `-connect` (and for parsing any network related parameters like `-proxy`, `-onion`, `-externalip`) as we use proxy and the names are resolved by tor exit node.
+
+== Steps to get this project up and running
+
+=== Requirements
+
+- https://docs.docker.com/engine/[Docker Engine]
+- https://docs.docker.com/compose/[Docker Compose]
+- (optional) https://www.passwordstore.org/[pass]
+
+=== Configure and start the project
+
+These are general quick steps to start dockerized pivx operating through the tor network. More detailed instructions on various available configurations are provided further in this doc.
+
+- Edit _.env_ file to fit your environment. Or alternatively override the values via `export VAR=new_value`. Note: Default values here are just fine, so you may leave it as is (maybe just change `PIVX_BACKUPDIR` variable to match your preferred backups dir location).
+
+    cp .env.dist .env
+    vim .env
+
+- Validate and view the resulting docker-compose file
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml config
+
+- Generate configuration files for main services.
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config
+
+- Start the main stack of services detached
+
+    docker-compose up -d
+
+=== Monitoring, stopping, and removing operations
+
+- Monitor logs from containers of the stack.
+
+    docker-compose logs -f
+
+- Check states of all containers belonging to this project.
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml ps
+
+- Check available commands for administrative (config and backup) ad-hoc services.
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config help
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run backup help
+
+- Stop main services so they can be started again by `docker-compose start`.
+
+    docker-compose stop
+
+- Stop and remove all containers and networks belonging to the project (the volumes will be left intact).
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml down
+
+
+== Project variables from .env file
+
+Variables from _.env_ file can be overriden by exporting any of them as a shell environment variables.
+
+====
+.Default values.
+....
+# TOR SERVICE ============================================== # <1>
+TOR_IMAGE=vadyochik/tor # <2>
+TOR_ISOLATED_IP=10.51.47.6 # <3>
+TOR_ISOLATED_SUBNET=10.51.47.0/29 # <4>
+TOR_LOG_LEVEL=notice # <5>
+TOR_CONFIG_REGENERATE=YES # <6>
+
+# PIVX SERVICE ============================================= # <7>
+PIVX_IMAGE=vadyochik/pivx:alpine # <8>
+PIVX_UID=51472 # <9>
+PIVX_ISOLATED_IP=10.51.47.2 # <10>
+PIVX_ONLYNET=tor # <11>
+PIVX_ONION_HIDDEN_SERVICE=YES # <12>
+PIVX_ONION_HIDDEN_SERVICE_REGENERATE=YES # <13>
+#PIVX_ZPIV_AUTOMINT=YES # <14>
+#PIVX_DEBUG=tor # <15>
+PIVX_CONFIG_REGENERATE=YES # <16>
+PIVX_BACKUPDIR=~/backup # <17>
+
+# COMPOSE PROJECT ========================================== # <18>
+#COMPOSE_PROJECT_NAME=projectcustomname  # <19>
+#COMPOSE_FILE=docker-compose-custom.yml  # <20>
+....
+<1>  *TOR SERVICE* variables:
+<2>  (required) image used for TOR service. Eg.: "vadyochik/tor", "osminogin/tor-simple"..
+<3>  (required) IP address of TOR container in isolated net.
+<4>  (required) Isolated net IP subnet.
+<5>  (optional) TOR service log verbosity level. Valid https://www.torproject.org/docs/faq.html.en#LogLevel[log levels] are: err, warn, notice, info, debug.
+<6>  (optional) Whether to regenerate torrc configuration file or not.
+<7>  *PIVX SERVICE* variables:
+<8>  (required) image used for PIVX service. Eg.: "vadyochik/pivx" (official binary release run on debian) or "vadyochik/pivx:alpine" (image built from sources  on alpine)
+<9>  (required) PIVX daemon user numeric UID.
+<10> (required) IP address of PIVX container in isolated net.
+<11> (optional) List of "onlynet=" nets (delimited by space) for _pivx.conf_ file.
+<12> (optional) Whether to start PIVX as an onion hidden service or not.
+<13> (optional) Whether to regenerate PIVX onion hidden service data or not.
+<14> (optional) If omitted or not set to YES, adds `enablezeromint=0` to _pivx.conf_ to disable zPIV AutoMint.
+<15> (optional) Enable debugging output for listed pivx components.
+<16> (optional) Whether to regenerate _pivx.conf_ configuration file or not.
+<17> (required) Path for storing PIVX backups. Can be either local directory or a docker named volume.
+<18> *COMPOSE PROJECT* variables:
+<19> (optional) Alternative name for this project. Defaults to current directory name.
+<20> (optional) Alternative docker-compose file. Defaults to _docker-compose.yml_.
+====
+
+== How to start onion-only PIVX in TOR as a hidden service [prefered, default]
+NOTE: This mode is prefered and it is already a default configuration when using unmodified settings from _.env.sample_ file.
+
+1. Make sure `PIVX_ONION_HIDDEN_SERVICE` is set to 'YES' and `PIVX_ONLYNET` is set to 'tor' in project's _.env_ file:
+
+    vim .env
++
+====
+._.env_
+----
+PIVX_ONLYNET=tor
+PIVX_ONION_HIDDEN_SERVICE=YES
+----
+====
+
+2. Regenerate configuration files:
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config
+
+3. Start services detached:
+
+    docker-compose up -d
+
+4. Monitor logs from containers:
+
+    docker-compose logs -f
+
+== How to start onion-only PIVX in TOR as a client
+
+1. Make sure `PIVX_ONION_HIDDEN_SERVICE` is *not* set to 'YES' and `PIVX_ONLYNET` is set to 'tor' in project's _.env_ file:
+
+   vim .env
++
+====
+._.env_
+----
+PIVX_ONLYNET=tor
+PIVX_ONION_HIDDEN_SERVICE=NO
+----
+====
+
+2. Regenerate configuration files:
+
+   docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config
+
+3. Start services detached:
+
+   docker-compose up -d
+
+4. Monitor logs from containers:
+
+   docker-compose logs -f
+
+== How to start ipv4/ipv6/onion PIVX in TOR as a ipv4/ipv6 client and onion hidden service
+
+1. Make sure `PIVX_ONION_HIDDEN_SERVICE` is set to 'YES' and `PIVX_ONLYNET` is set to 'ipv4 ipv6 tor' in project's _.env_ file:
+
+   vim .env
++
+====
+._.env_
+----
+PIVX_ONLYNET=ipv4 ipv6 tor
+PIVX_ONION_HIDDEN_SERVICE=YES
+----
+====
+
+2. Regenerate configuration files:
+
+   docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config
+
+3. Start services detached:
+
+   docker-compose up -d
+
+4. Monitor logs from containers:
+
+   docker-compose logs -f
+
+== How to start ipv4/ipv6/onion PIVX in TOR as a client
+
+1. Make sure `PIVX_ONION_HIDDEN_SERVICE` is *not* set to 'YES' and `PIVX_ONLYNET` is set to 'ipv4 ipv6 tor' in project's _.env_ file:
+
+   vim .env
++
+====
+._.env_
+----
+PIVX_ONLYNET=ipv4 ipv6 tor
+PIVX_ONION_HIDDEN_SERVICE=NO
+----
+====
+
+2. Regenerate configuration files:
+
+   docker-compose -f docker-compose.yml -f docker-compose.admin.yml run config
+
+3. Start services detached:
+
+   docker-compose up -d
+
+4. Monitor logs from containers:
+
+   docker-compose logs -f
+
+== How to create wallet.dat backups
+First, make sure you set correct path for *PIVX_BACKUPDIR* variable in _.env_ file.
+Then execute the following commands:
+
+    docker-compose exec pivx pivx-cli backupwallet .pivx/backups/
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run backup
+
+The first command safely copies current wallet.dat file to _backups_ folder inside the container, then the second command creates a tar.gz archive of _backups_ directory, _wallet.dat_, _masternode.conf_ and _pivx.conf_ files into *$PIVX_BACKUPDIR* folder on docker host.
+
+If pivx container is not currently running, then use just the second command only.
+
+To list content of _backups_ folder inside the container, use the command like this:
+
+    docker-compose exec pivx ls -la .pivx/backups
+
+To delete all content from _backups_ folder inside the container, use the command like this:
+
+    docker-compose exec pivx find .pivx/backups/ -type f -delete
+
+To check available commands for backup service, run help:
+
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run backup help
+
+
+== Basic commands for pivx-cli utility
+
+Please refer to `pivx-cli help` and `pivx-cli help <command>` for more details.
+
+To use dockerized `pivx-cli` from host machine, set a shell alias like this:
+
+----
+alias pivx-cli="docker-compose exec pivx pivx-cli"
+----
+
+.Info operations
+Various commands for getting information from the wallet and the network.
+====
+----
+pivx-cli getinfo # <1>
+pivx-cli getbalance # <2>
+pivx-cli getwalletinfo # <3>
+pivx-cli getblockchaininfo # <4>
+pivx-cli getblockcount # <5>
+pivx-cli getdifficulty # <6>
+pivx-cli getconnectioncount # <7>
+pivx-cli getnettotals # <8>
+pivx-cli getnetworkinfo # <9>
+pivx-cli getpeerinfo # <10>
+pivx-cli getbudgetinfo # <11>
+pivx-cli getbudgetprojection # <12>
+pivx-cli getmasternodecount # <13>
+pivx-cli getstakingstatus # <14>
+pivx-cli mnsync status # <15>
+pivx-cli listtransactions # <16>
+----
+<1> Get general information about the wallet and the network.
+<2> Get available balance (excluding zerocoins).
+<3> Get various wallet state info.
+<4> Get various state info regarding block chain processing.
+<5> Get the number of blocks in the longest block chain.
+<6> Get PoS network difficulty.
+<7> Get the number of connections to other nodes.
+<8> Get information about network traffic (bytes in, bytes out) and current time.
+<9> Get various state info regarding P2P networking.
+<10> Get data about each connected network node as a json array of objects.
+<11> Show current masternode budgets.
+<12> Show the projection of which proposals will be paid the next cycle.
+<13> Get masternode count values.
+<14> Get various staking information.
+<15> Get the sync status.
+<16> List most recent transactions.
+
+====
+
+.Mint Zerocoin (Mint the specified zPIV amount)
+Convert PIV to zPIV. Requires wallet passphrase to be set with `walletpassphrase` call. Format: `mintzerocoin amount ( utxos )`.
+====
+----
+pivx-cli walletpassphrase "$(pass show pivxtor)" 0 false # <1>
+pivx-cli mintzerocoin 82 # <2>
+pivx-cli getzerocoinbalance # <3>
+pivx-cli listmintedzerocoins # <4>
+pivx-cli listzerocoinamounts # <5>
+----
+<1> Unlock the wallet.
+<2> Mint 82 zPIV.
+<3> Get the wallet's total zPIV balance.
+<4> List all zPIV mints in the wallet.
+<5> Get information about your zerocoin amounts.
+
+NOTE: {pass_note}
+
+====
+
+.Spend Zerocoin (Spend zPIV to a PIV address.)
+Convert zPIV to PIV. Requires wallet passphrase to be set with `walletpassphrase` call. Format: `spendzerocoin amount mintchange minimizechange securitylevel ( "address" )`.
+====
+[source,subs="attributes,verbatim"]
+----
+pivx-cli walletpassphrase "$(pass show pivxtor)" 0 false # <1>
+pivx-cli spendzerocoin 82 false true 100 {pivx_address} # <2>
+----
+<1> Unlock the wallet.
+<2> Spend 82 zPIV to address {pivx_address}.
+
+NOTE: {pass_note}
+
+====
+
+== How to start staking your coins
+
+*Stacking requirements:*
+
+- *validtime*: the chain tip is within staking phases
+- *haveconnections*: wallet must have active network connections
+- *walletunlocked*: wallet must be unlocked (unencrypted wallets are always considered unlocked)  
+- *mintablecoins*: wallet must have mintable coins (at least 101 confirmations)
+- *enoughcoins*: walelt must have more coins than reserve balance (reservebalance default is 0)
+- *mnsync*: masternode additional data must be synced
+
+=== Regular PIV staking (+2 PIV per mint)
+
+While the chain is syncing… let’s get an address, back it up propperly and setup the wallet passphrase. Then send coins to this address and unlock the wallet for anonimization and stacking only. Check staking status.
+
+. (optional) Unset HISTFILE env var as it may accidentally save your plaintext passphrases entered on console to `~/.bash_history` if not using `pass` or `gpg` tools.
+
+    unset HISTFILE
+
+. Set alias for using dockerized pivx-cli.
+
+    alias pivx-cli="docker-compose exec pivx pivx-cli"
+
+. (optional) Informational-only commands. +
+  Check wallet: get wallet info, list accounts and their addresses, get total available balance.
+
+    pivx-cli getwalletinfo
+    pivx-cli listaccounts
+    pivx-cli getaddressesbyaccount ""
+    pivx-cli getaddressesbyaccount "Staking account"
+    pivx-cli getbalance
+
+. (optional) Generate secure passphrase that will be used to encrypt the wallet.
+
+    pass generate pivxtor 128
+
+. If the wallet was not yet encrypted, do encrypt it with the passphrase generated by `pass` utility from previous step (or with some other random passphrase) and restart PIVX daemon. Then run "getinfo" to ensure it started ok. If the wallet is already encrypted, skip this step.
+
+    pivx-cli encryptwallet "$(pass show pivxtor)"
+    docker-compose restart pivx
+    pivx-cli getinfo
+
+. Get new PIVX receiving address under "Staking account" account.
+
+    pivx-cli getnewaddress "Staking account"
+
+. Send coins from exchange or another local PIVX wallet to this new address. +
+  Here are command-line examples of sending 50 PIV and 55 zPIV to {pivx_address} address:
+
+[source,subs="attributes"]
+----
+pivx-cli sendtoaddress {pivx_address} 50
+pivx-cli spendzerocoin 55 false true 100 {pivx_address}
+----
+
+. (optional) Encrypt a private key corresponding to the above address and put the returned result into a safe place (eg. offline password manager db). Again, we use `pass` utility here to generate (and store) a random secure passphrase for the encryption. Note: this operation requires wallet passphrase, so we unlock the wallet before issuing `bip38encrypt` command, then lock it back with `walletlock` command.
+
+[source,subs="attributes"]
+----
+pivx-cli walletpassphrase "$(pass show pivxtor)" 0 false
+pivx-cli bip38encrypt {pivx_address} "$(pass generate {pivx_address} 128)"
+pivx-cli walletlock
+----
+
+. Backup your wallet and its config files. First you may want to clean up "backups" folder from previous unencrypted _wallet.dat_ backups.
+
+    docker-compose exec pivx find .pivx/backups/ -type f -delete
+    pivx-cli backupwallet .pivx/backups/
+    docker-compose -f docker-compose.yml -f docker-compose.admin.yml run backup
+
+. Unlock the wallet for anonymization and staking only. Then after few seconds check staking status with `getinfo` or `getstakingstatus` commands. Note: `getstakingstatus` command should return all values as _true_.
+
+    pivx-cli walletpassphrase "$(pass show pivxtor)" 0 true
+    pivx-cli getstakingstatus
+
+NOTE: {pass_note}
+
+=== New zPoS zPIV staking (+3 zPIV per mint)
+
+. Ensure the wallet is encrypted and has some amount of regular PIV that will be converted to zPIV now. Refer to the <<_regular_piv_staking_2_piv_per_mint,previous section>> for detailed info on preparing the wallet for staking.
+
+. (optional) Backup your deterministic zPIV seed. Use `getzpivseed` command to get dzPIV seed and put this info into a safe place. Note: this operation requires wallet passphrase, so we unlock the wallet before issuing `getzpivseed` command, then lock it back with `walletlock` command.
+
+    pivx-cli walletpassphrase "$(pass show pivxtor)" 0 false
+    pivx-cli getzpivseed
+    pivx-cli walletlock
+
+. (optional) Check wallet's total PIV and zPIV balances.
+
+    pivx-cli getbalance
+    pivx-cli getzerocoinbalance
+
+. Mint zPIV (convert PIV to zPIV), check zPIV balance and amounts. Note: the wallet needs to be unlocked with `walletpassphrase` call. In the below example we mint 82 zPIVs from regular PIVs.
+
+    pivx-cli walletpassphrase "$(pass show pivxtor)" 0 false
+    pivx-cli mintzerocoin 82
+    pivx-cli listmintedzerocoins
+    pivx-cli getzerocoinbalance
+    pivx-cli listzerocoinamounts
+
+. Unlock the wallet for anonymization and staking only. Then after few seconds check staking status with `getinfo` or `getstakingstatus` commands. Note: `getstakingstatus` command should return all values as _true_.
+
+    pivx-cli walletpassphrase "$(pass show pivxtor)" 0 true
+    pivx-cli getstakingstatus
+
+NOTE: {pass_note}
+
+TIP: Both regular PIV and zPIV can be staked at the same time.
+
+== How to run PIVX masternode
+WARNING: *This part is not yet implemented.*
+
+== How to start reindex process
+
+If the wallet was not exited cleanly, you may need to reindex the blockchain, starting the `pivxd` process with `-reindex` option, then waiting few hours for the blockchain full reindex, and restarting `pivxd` back with its default options.
+
+- Create _docker-compose.override.yml_ file,footnote:[More info about the override file can be found in https://docs.docker.com/compose/extends/] with the following content:
+----
+version: '3'
+services:
+  pivx:
+    command:
+      - -printtoconsole
+      - -reindex
+----
+- Start the project as usual with `docker-compose up -d`
+- Wait until the blockchain reindex process completes, checking current block count with `pivx-cli getblockcount` and pivxd logs with `docker-compose logs -f pivx`.
+- Remove or rename _docker-compose.override.yml_ file and recreate the containers with: `docker-compose down && docker-compose up -d`
+
+== How to start PIVX wallet and unlock it for staking only
+
+When everything was already configured and you just need to start the wallet for staking, run these commands:
+
+    docker-compose up -d
+    alias pivx-cli="docker-compose exec pivx pivx-cli"
+    pivx-cli getinfo
+    pivx-cli mnsync status
+    pivx-cli getstakingstatus
+    pivx-cli walletpassphrase "$(pass show pivxtor)" 0 true
+    pivx-cli getstakingstatus
+
+NOTE: {pass_note}
+
+== Reference materials and "thank-you"s
+
+Many thanks goes to the below sources that were used during creation of this project.
+
++++<u>PIVX related:</u>+++
+
+* https://github.com/dok3r/pivx
+* https://github.com/erlend/docker-pivx
+* https://github.com/guggero/docker-pivx-masternode
+* https://forum.pivx.org/t/how-to-staking-with-the-command-line-wallet/962
+* https://github.com/PIVX-Project/PIVX-Wiki/blob/master/Developer-Documentation/APIs/JSON-RPC/API-Calls-List.mediawiki
+
++++<u>Tor related:</u>+++
+
+* https://github.com/osminogin/docker-tor-simple
+* https://github.com/TeamHG-Memex/tor-proxy
+* https://github.com/ogarcia/docker-tor
+* https://github.com/dperson/torproxy
+
